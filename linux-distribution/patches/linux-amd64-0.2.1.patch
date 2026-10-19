@@ -206,10 +206,10 @@ index 0000000..5fdbd1a
 +}
 diff --git a/apps/desktop/scripts/linux-electron-builder.mjs b/apps/desktop/scripts/linux-electron-builder.mjs
 new file mode 100644
-index 0000000..2ee4799
+index 0000000..1852730
 --- /dev/null
 +++ b/apps/desktop/scripts/linux-electron-builder.mjs
-@@ -0,0 +1,97 @@
+@@ -0,0 +1,101 @@
 +/** Linux-only package configuration; macOS and Windows retain their upstream release path. */
 +import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 +import { join, relative, resolve, sep } from 'node:path'
@@ -270,11 +270,15 @@ index 0000000..2ee4799
 +    extraResources: [
 +      { from: paths.runtime, to: 'runtime' },
 +      { from: join(APP_ROOT, 'resources/icon.png'), to: 'icon.png' },
++      // Linux status notifiers consume a PNG; the window and About panel keep the square app icon.
++      { from: join(APP_ROOT, 'resources/icon-windows.png'), to: 'tray.png' },
 +    ],
 +    linux: {
 +      executableName: 'deepseek-harness',
 +      syncDesktopName: true,
-+      icon: join(APP_ROOT, 'resources/icon.png'),
++      // A scalable icon lets the launcher resolve every panel and menu size; a lone 1104 px PNG
++      // installs under a non-standard hicolor size and leaves the launcher entry without an icon.
++      icon: join(APP_ROOT, 'resources/icon.svg'),
 +      category: 'Development',
 +      target: [{ target: 'deb', arch: ['x64'] }],
 +      desktop: { entry: { StartupWMClass: 'deepseek-harness', Name: 'DeepSeek Harness', Comment: 'DeepSeek Harness Linux desktop' } },
@@ -376,10 +380,10 @@ index 69bade9..497c2d6 100644
    const settings = loadDesktopPackageEnvironment(platform, env, appRoot, { unsigned: true })
 diff --git a/apps/desktop/scripts/tests/linux-build.test.mjs b/apps/desktop/scripts/tests/linux-build.test.mjs
 new file mode 100644
-index 0000000..c5bb09c
+index 0000000..e78e5a0
 --- /dev/null
 +++ b/apps/desktop/scripts/tests/linux-build.test.mjs
-@@ -0,0 +1,49 @@
+@@ -0,0 +1,53 @@
 +import assert from 'node:assert/strict'
 +import { test } from 'node:test'
 +import { join } from 'node:path'
@@ -405,6 +409,10 @@ index 0000000..c5bb09c
 +  assert.equal(config.detectUpdateChannel, false)
 +  assert.equal(config.generateUpdatesFilesForAllChannels, true)
 +  assert.equal(config.extraMetadata.dshLinuxOtaRepository, 'example/linux-harness')
++  // A scalable icon reaches every launcher size; the PNG above installs under a non-standard hicolor entry.
++  assert.ok(config.linux.icon.endsWith(join('resources', 'icon.svg')))
++  const tray = config.extraResources.find(resource => resource.to === 'tray.png')
++  assert.ok(tray?.from.endsWith(join('resources', 'icon-windows.png')))
 +  assert.equal(config.extraMetadata.dshDesktopAppId, config.appId)
 +  assert.ok(config.deb.depends.includes('polkitd'))
 +  assert.ok(config.deb.depends.includes('pkexec'))
@@ -480,10 +488,24 @@ index 0000000..2f4b59f
 +  await processOperations.execute('/usr/bin/pkexec', ['/usr/bin/dpkg', '--install', packagePath], env)
 +}
 diff --git a/apps/desktop/src/main.ts b/apps/desktop/src/main.ts
-index 2afdfd7..3c68e12 100644
+index 2afdfd7..94359c9 100644
 --- a/apps/desktop/src/main.ts
 +++ b/apps/desktop/src/main.ts
-@@ -1264,6 +1264,7 @@ async function main(): Promise<void> {
+@@ -988,8 +988,11 @@ async function main(): Promise<void> {
+     tray?.relabel()
+   }
+   refreshApplicationMenu()
+-  const trayIconPath = development ? join(app.getAppPath(), 'resources', 'tray-windows.ico') : join(process.resourcesPath, 'tray.ico')
+-  if (process.platform === 'win32') {
++  const trayIconName = process.platform === 'linux' ? 'tray.png' : 'tray.ico'
++  const trayIconPath = development
++    ? join(app.getAppPath(), 'resources', process.platform === 'linux' ? 'icon-windows.png' : 'tray-windows.ico')
++    : join(process.resourcesPath, trayIconName)
++  if (process.platform === 'win32' || process.platform === 'linux') {
+     // The tray is the way back to a hidden window; without it, relaunching the application still focuses it.
+     try {
+       tray = new DesktopTray({ iconPath: trayIconPath, locale: currentDesktopLocale,
+@@ -1264,6 +1267,7 @@ async function main(): Promise<void> {
        .catch((error: unknown) => { console.error(error) }).finally(() => { app.quit() })
    }
    app.on('before-quit', (event) => {
@@ -491,6 +513,24 @@ index 2afdfd7..3c68e12 100644
      if (shellInstallerOwnsQuit) {
        shuttingDown = true
        quitConfirmation.dispose()
+diff --git a/apps/desktop/src/tray.ts b/apps/desktop/src/tray.ts
+index b2ce416..3729039 100644
+--- a/apps/desktop/src/tray.ts
++++ b/apps/desktop/src/tray.ts
+@@ -1,11 +1,11 @@
+-/** Windows system tray: the always-present way back to a hidden window and the explicit quit entry. */
++/** Windows and Linux system tray: the always-present way back to a hidden window and the explicit quit entry. */
+ 
+ import { Menu, nativeImage, Tray } from 'electron'
+ import type { DesktopLocale } from './locale.ts'
+ 
+ /** Main-process actions the tray triggers; both run the same paths as the window and application menu. */
+ export interface DesktopTrayOptions {
+-  /** Multi-size ICO rendered by `scripts/render-tray-icon.ts`; Windows picks the bitmap for the display scale. */
++  /** Windows multi-size ICO from `scripts/render-tray-icon.ts`, or the Linux status-notifier PNG. */
+   readonly iconPath: string
+   readonly locale: () => DesktopLocale
+   /** Show and focus the primary window. */
 diff --git a/apps/desktop/src/update-coordinator.ts b/apps/desktop/src/update-coordinator.ts
 index 3b83cea..5c6203d 100644
 --- a/apps/desktop/src/update-coordinator.ts
@@ -728,6 +768,34 @@ index 0000000..488a8ac
 +    expect(execute).not.toHaveBeenCalled()
 +  })
 +})
+diff --git a/apps/desktop/tests/main-startup.spec.ts b/apps/desktop/tests/main-startup.spec.ts
+index d9a8f31..dbf831a 100644
+--- a/apps/desktop/tests/main-startup.spec.ts
++++ b/apps/desktop/tests/main-startup.spec.ts
+@@ -1280,6 +1280,23 @@ describe('desktop main startup', () => {
+     expect(harness.trays[0]!.setContextMenu.mock.calls.length).toBe(relabels + 1)
+   })
+ 
++  it('creates the Linux status-notifier tray and reopens the hidden window from it', async () => {
++    vi.stubGlobal('process', { ...process, platform: 'linux', arch: 'x64', resourcesPath: 'desktop-test-resources' })
++    const host = await readyWorkspace()
++    const window = harness.windows[0]!
++    expect(harness.trays).toHaveLength(1)
++    expect(harness.trays[0]!.image).toEqual({ path: join('desktop-test-resources', 'tray.png') })
++    window.show.mockClear()
++    window.close()
++    // Linux has no Win32 background notice: closing hides to the tray and keeps the Host running.
++    expect(window.hide).toHaveBeenCalledOnce()
++    expect(harness.backgroundNotice.close).not.toHaveBeenCalled()
++    expect(harness.app.quit).not.toHaveBeenCalled()
++    harness.trays[0]!.emit('click')
++    expect(window.show).toHaveBeenCalledOnce()
++    expect(host.stop).not.toHaveBeenCalled()
++  })
++
+   it('keeps the workspace visible while acknowledgement is pending and ignores a destroyed window', async () => {
+     await readyWorkspace()
+     const window = harness.windows[0]!
 diff --git a/apps/desktop/tests/retain-desktop-ci.spec.ts b/apps/desktop/tests/retain-desktop-ci.spec.ts
 index abe3565..01b9e36 100644
 --- a/apps/desktop/tests/retain-desktop-ci.spec.ts
