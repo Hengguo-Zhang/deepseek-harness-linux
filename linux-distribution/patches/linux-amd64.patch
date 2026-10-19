@@ -1,0 +1,864 @@
+diff --git a/apps/desktop/scripts/desktop-build-paths.d.mts b/apps/desktop/scripts/desktop-build-paths.d.mts
+index 9a8e408..aeba368 100644
+--- a/apps/desktop/scripts/desktop-build-paths.d.mts
++++ b/apps/desktop/scripts/desktop-build-paths.d.mts
+@@ -1,5 +1,8 @@
+ import type { DesktopAutoUpdateTarget } from './desktop-auto-update-environment.mjs'
+ 
++/** Build targets include the separately published Linux distribution. */
++export type DesktopBuildTarget = DesktopAutoUpdateTarget | 'linux-x64'
++
+ /** Mutable target directories plus the shared immutable download cache. */
+ export interface DesktopTargetBuildPaths {
+   readonly root: string
+@@ -27,14 +30,14 @@ export function resolveDesktopBuildTarget(
+   env?: NodeJS.ProcessEnv,
+   hostPlatform?: NodeJS.Platform,
+   hostArch?: string,
+-): DesktopAutoUpdateTarget
++): DesktopBuildTarget
+ 
+ /**
+  * Return the mutable preparation and artifact directories owned by one release target.
+  * @param target - Supported Desktop target name.
+  * @returns Target paths plus the shared immutable download cache.
+  */
+-export function desktopTargetBuildPaths(target: DesktopAutoUpdateTarget): DesktopTargetBuildPaths
++export function desktopTargetBuildPaths(target: DesktopBuildTarget): DesktopTargetBuildPaths
+ 
+ /**
+  * Return the platform and architecture of the payload one release target prepares.
+@@ -42,8 +45,8 @@ export function desktopTargetBuildPaths(target: DesktopAutoUpdateTarget): Deskto
+  * @param target - Supported Desktop target name.
+  * @returns Platform and architecture of the prepared payload.
+  */
+-export function desktopTargetPlatform(target: DesktopAutoUpdateTarget): {
+-  readonly platform: 'darwin' | 'win32'
++export function desktopTargetPlatform(target: DesktopBuildTarget): {
++  readonly platform: 'darwin' | 'win32' | 'linux'
+   readonly arch: 'arm64' | 'x64'
+ }
+ 
+diff --git a/apps/desktop/scripts/desktop-build-paths.mjs b/apps/desktop/scripts/desktop-build-paths.mjs
+index 4f33e80..d44bf0f 100644
+--- a/apps/desktop/scripts/desktop-build-paths.mjs
++++ b/apps/desktop/scripts/desktop-build-paths.mjs
+@@ -4,14 +4,14 @@ import { join, resolve } from 'node:path'
+ 
+ const APP_ROOT = resolve(import.meta.dirname, '..')
+ const BUILD_ROOT = join(APP_ROOT, '.desktop-build')
+-const SUPPORTED_TARGETS = new Set(['mac-arm64', 'mac-x64', 'win-x64'])
++const SUPPORTED_TARGETS = new Set(['mac-arm64', 'mac-x64', 'win-x64', 'linux-x64'])
+ 
+ /**
+  * Resolve the fixed build target selected by a packaging environment.
+  * @param {NodeJS.ProcessEnv} env - Packaging environment.
+  * @param {NodeJS.Platform} hostPlatform - Build-host platform used when no target override exists.
+  * @param {string} hostArch - Build-host architecture used when no target override exists.
+- * @returns {'mac-arm64' | 'mac-x64' | 'win-x64'} Supported Desktop target name.
++ * @returns {'mac-arm64' | 'mac-x64' | 'win-x64' | 'linux-x64'} Supported Desktop target name.
+  */
+ export function resolveDesktopBuildTarget(
+   env = process.env,
+@@ -26,7 +26,7 @@ export function resolveDesktopBuildTarget(
+   if (!SUPPORTED_TARGETS.has(target)) {
+     throw new Error(`desktop build paths: unsupported target ${target}`)
+   }
+-  return /** @type {'mac-arm64' | 'mac-x64' | 'win-x64'} */ (target)
++  return /** @type {'mac-arm64' | 'mac-x64' | 'win-x64' | 'linux-x64'} */ (target)
+ }
+ 
+ function assertSupportedTarget(target) {
+@@ -37,7 +37,7 @@ function assertSupportedTarget(target) {
+ 
+ /**
+  * Return the mutable preparation and artifact directories owned by one release target.
+- * @param {'mac-arm64' | 'mac-x64' | 'win-x64'} target - Supported Desktop target name.
++ * @param {'mac-arm64' | 'mac-x64' | 'win-x64' | 'linux-x64'} target - Supported Desktop target name.
+  * @returns {{ root: string, artifacts: string, unsignedArtifacts: string, runtime: string, packageSet: string, dsh: string, dshPnpm: string, electron: string, packedDsh: string, packedVendor: string, packedLandlock: string, downloads: string }} Target paths plus the shared immutable download cache.
+  */
+ export function desktopTargetBuildPaths(target) {
+@@ -63,13 +63,13 @@ export function desktopTargetBuildPaths(target) {
+ /**
+  * Return the platform and architecture of the payload one release target prepares.
+  * Windows is prepared as x64 only, so this differs from the build host on an arm64 Windows machine.
+- * @param {'mac-arm64' | 'mac-x64' | 'win-x64'} target - Supported Desktop target name.
+- * @returns {{ platform: 'darwin' | 'win32', arch: 'arm64' | 'x64' }} Platform and architecture of the prepared payload.
++ * @param {'mac-arm64' | 'mac-x64' | 'win-x64' | 'linux-x64'} target - Supported Desktop target name.
++ * @returns {{ platform: 'darwin' | 'win32' | 'linux', arch: 'arm64' | 'x64' }} Platform and architecture of the prepared payload.
+  */
+ export function desktopTargetPlatform(target) {
+   assertSupportedTarget(target)
+   return {
+-    platform: /** @type {'darwin' | 'win32'} */ (target === 'win-x64' ? 'win32' : 'darwin'),
++    platform: /** @type {'darwin' | 'win32' | 'linux'} */ (target === 'win-x64' ? 'win32' : target === 'linux-x64' ? 'linux' : 'darwin'),
+     arch: /** @type {'arm64' | 'x64'} */ (target === 'mac-arm64' ? 'arm64' : 'x64'),
+   }
+ }
+diff --git a/apps/desktop/scripts/development-project.ts b/apps/desktop/scripts/development-project.ts
+index d544ce6..2f9f112 100644
+--- a/apps/desktop/scripts/development-project.ts
++++ b/apps/desktop/scripts/development-project.ts
+@@ -16,7 +16,7 @@ import { dirname, join } from 'node:path'
+ import { createDevelopmentProjectMetadata } from '../src/project-manager.ts'
+ import type { DesktopRelease } from '../src/release.ts'
+ import { DESKTOP_RUNTIME_FILE, type DesktopRuntimeDescriptor } from '../src/runtime-tree.ts'
+-import type { DesktopAutoUpdateTarget } from './desktop-auto-update-environment.mjs'
++import type { DesktopBuildTarget } from './desktop-build-paths.mjs'
+ import { desktopTargetPlatform } from './desktop-build-paths.mjs'
+ 
+ interface PackageManifest {
+@@ -38,7 +38,7 @@ export interface DevelopmentProjectOptions {
+   /** Release identity written into the disposable project metadata. */
+   readonly release: DesktopRelease
+   /** Build target whose prepared payload the disposable project runs against. */
+-  readonly target: DesktopAutoUpdateTarget
++  readonly target: DesktopBuildTarget
+ }
+ 
+ function readManifest(path: string): PackageManifest {
+diff --git a/apps/desktop/scripts/linux-build-source.mjs b/apps/desktop/scripts/linux-build-source.mjs
+new file mode 100644
+index 0000000..5fdbd1a
+--- /dev/null
++++ b/apps/desktop/scripts/linux-build-source.mjs
+@@ -0,0 +1,20 @@
++/** Read the official commit recorded in a source archive that has no Git metadata. */
++import { readFileSync } from 'node:fs'
++import { join } from 'node:path'
++
++/**
++ * Validate an archive's source identity before supplying its client build commit.
++ * @param {string} root - Source repository root containing package.json and LINUX-SOURCE.json.
++ * @returns {string} Forty-character official source commit recorded by the archive producer.
++ */
++export function linuxArchiveCommit(root) {
++  let record
++  try { record = JSON.parse(readFileSync(join(root, 'LINUX-SOURCE.json'), 'utf8')) }
++  catch { throw new Error('Linux source archive has no readable LINUX-SOURCE.json. Use a Git checkout or set DSH_CLIENT_COMMIT_HASH explicitly.') }
++  const product = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
++  if (record === null || typeof record !== 'object' || record.version !== product.version
++    || typeof record.sha !== 'string' || !/^[0-9a-f]{40}$/u.test(record.sha)) {
++    throw new Error('LINUX-SOURCE.json must contain the matching package version and a 40-character official source sha')
++  }
++  return record.sha
++}
+diff --git a/apps/desktop/scripts/linux-electron-builder.mjs b/apps/desktop/scripts/linux-electron-builder.mjs
+new file mode 100644
+index 0000000..57495f5
+--- /dev/null
++++ b/apps/desktop/scripts/linux-electron-builder.mjs
+@@ -0,0 +1,95 @@
++/** Linux-only package configuration; macOS and Windows retain their upstream release path. */
++import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
++import { join, relative, resolve, sep } from 'node:path'
++import { fileURLToPath } from 'node:url'
++import { desktopTargetBuildPaths } from './desktop-build-paths.mjs'
++
++const APP_ROOT = fileURLToPath(new URL('..', import.meta.url))
++
++/**
++ * Resolve the public repository that serves anonymous Linux updates.
++ * @param {NodeJS.ProcessEnv} env - Build environment containing the distribution repository.
++ * @returns {string} Public GitHub owner/repository identifier.
++ */
++export function linuxOtaRepository(env = process.env) {
++  const repository = env.DSH_LINUX_OTA_REPOSITORY?.trim() ?? ''
++  if (!/^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?\/[A-Za-z0-9_.-]+$/u.test(repository)
++    || repository.split('/')[1] === '.' || repository.split('/')[1] === '..') {
++    throw new Error('Linux package: DSH_LINUX_OTA_REPOSITORY must be a public GitHub owner/repository')
++  }
++  return repository
++}
++
++/**
++ * Create a DEB package with a generic electron-updater feed hosted by GitHub Releases.
++ * @param {NodeJS.ProcessEnv} env - Build environment; no credentials are embedded in artifacts.
++ * @returns {object} electron-builder configuration for Ubuntu 24.04 amd64.
++ */
++export function createLinuxElectronBuilderConfig(env = process.env) {
++  const repository = linuxOtaRepository(env)
++  const appId = env.DSH_DESKTOP_APP_ID?.trim() || 'com.deepseek.harness'
++  if (!/^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/u.test(appId)) throw new Error('Linux package: DSH_DESKTOP_APP_ID must be a reverse-DNS identifier')
++  const paths = desktopTargetBuildPaths('linux-x64')
++  const product = JSON.parse(readFileSync(join(APP_ROOT, 'package.json'), 'utf8'))
++  const feed = { provider: 'generic', url: `https://github.com/${repository}/releases/latest/download/`, channel: 'latest' }
++  return {
++    appId,
++    productName: 'DeepSeek Harness',
++    protocols: [{ name: 'DeepSeek Harness', schemes: ['dsh'] }],
++    artifactName: 'deepseek-harness-${version}-linux-amd64.${ext}',
++    extraMetadata: {
++      name: 'deepseek-harness',
++      author: { name: 'DeepSeek Harness Linux distribution', email: 'noreply@github.com' },
++      homepage: `https://github.com/${repository}`,
++      dshDesktopAppId: appId,
++      dshLinuxOtaRepository: repository,
++    },
++    directories: { app: APP_ROOT, output: resolve(APP_ROOT, '../../dist/linux-ota') },
++    electronDist: paths.electron,
++    electronFuses: { runAsNode: true },
++    asar: true,
++    asarUnpack: ['**/*.{node,dylib,dll,so,exe}', '**/*.so.*', '**/spawn-helper', '**/@vscode/ripgrep-*/bin/rg'],
++    files: [
++      'lib/main.js', 'lib/welcome/**/*', 'lib/preload-*.cjs', 'renderer/**/*', 'package.json',
++      { from: paths.dsh, to: 'dsh', filter: ['**/*'] },
++      { from: join(paths.dsh, 'node_modules'), to: 'dsh/node_modules', filter: ['**/*'] },
++    ],
++    extraResources: [
++      { from: paths.runtime, to: 'runtime' },
++      { from: join(APP_ROOT, 'resources/icon.png'), to: 'icon.png' },
++    ],
++    linux: {
++      executableName: 'deepseek-harness',
++      icon: join(APP_ROOT, 'resources/icon.png'),
++      category: 'Development',
++      target: [{ target: 'deb', arch: ['x64'] }],
++      desktop: { entry: { StartupWMClass: 'deepseek-harness', Name: 'DeepSeek Harness', Comment: 'DeepSeek Harness Linux desktop' } },
++    },
++    deb: {
++      maintainer: `DeepSeek Harness Linux distribution <noreply@github.com>`,
++      depends: ['libgtk-3-0t64', 'libnotify4', 'libnss3', 'libxss1', 'libxtst6', 'xdg-utils',
++        'libatspi2.0-0t64', 'libuuid1', 'libsecret-1-0', 'libasound2t64', 'libgbm1', 'ca-certificates', 'polkitd', 'pkexec'],
++    },
++    beforePack: async context => {
++      const { officePackageDirectories } = await import('../../../scripts/libreoffice-packages.mjs')
++      const office = await officePackageDirectories(paths.dsh, { platform: 'linux', arch: 'x64' })
++      context.packager.config.asarUnpack = [...context.packager.config.asarUnpack,
++        ...office.map(directory => `**/${relative(paths.dsh, directory).split(sep).join('/')}/**/*`)]
++    },
++    afterPack: async context => {
++      const { verifyDesktopRuntime } = await import('../lib/types/runtime-tree.js')
++      await verifyDesktopRuntime(paths.dsh, product.version, { platform: 'linux', arch: 'x64' })
++      const resources = context.packager.getResourcesDir(context.appOutDir)
++      mkdirSync(resources, { recursive: true })
++      // Explicitly emit this even when electron-builder runs with --publish never.
++      writeFileSync(join(resources, 'app-update.yml'),
++        `provider: generic\nurl: ${feed.url}\nchannel: latest\nupdaterCacheDirName: deepseek-harness-updater\n`)
++    },
++    detectUpdateChannel: false,
++    generateUpdatesFilesForAllChannels: true,
++    publish: [feed],
++  }
++}
++
++// electron-builder loads this module once; avoid requiring configuration during imports by tests.
++export default async function configuration() { return createLinuxElectronBuilderConfig() }
+diff --git a/apps/desktop/scripts/prepare-cli.ts b/apps/desktop/scripts/prepare-cli.ts
+index d2b9e14..59778c1 100644
+--- a/apps/desktop/scripts/prepare-cli.ts
++++ b/apps/desktop/scripts/prepare-cli.ts
+@@ -1,6 +1,6 @@
+ /** Package terminal launch scripts that reuse the installed Electron runtime. */
+ 
+-import { chmodSync, copyFileSync, mkdirSync } from 'node:fs'
++import { chmodSync, copyFileSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+ import { join } from 'node:path'
+ 
+ /**
+@@ -8,10 +8,14 @@ import { join } from 'node:path'
+  * @param destination - Physical runtime/cli directory prepared for the application.
+  * @param platform - Target Desktop operating system.
+  */
+-export function prepareDesktopCli(destination: string, platform: 'darwin' | 'win32'): void {
++export function prepareDesktopCli(destination: string, platform: 'darwin' | 'win32' | 'linux'): void {
+   const name = platform === 'win32' ? 'dsh.cmd' : 'dsh'
+   const command = join(destination, 'bin', name)
+   mkdirSync(join(destination, 'bin'), { recursive: true })
+   copyFileSync(join(import.meta.dirname, '..', 'cli', name), command)
+-  if (platform === 'darwin') chmodSync(command, 0o755)
++  if (platform === 'linux') {
++    const launcher = readFileSync(command, 'utf8').replace('$resources/../MacOS/DeepSeek Harness', '$resources/../deepseek-harness')
++    writeFileSync(command, launcher)
++  }
++  if (platform !== 'win32') chmodSync(command, 0o755)
+ }
+diff --git a/apps/desktop/scripts/prepare-dsh.ts b/apps/desktop/scripts/prepare-dsh.ts
+index 442e017..6cb7cfc 100644
+--- a/apps/desktop/scripts/prepare-dsh.ts
++++ b/apps/desktop/scripts/prepare-dsh.ts
+@@ -41,7 +41,7 @@ const STORE_ROOT = join(BUILD_ROOT, 'store')
+ const RUNTIME_ROOT = BUILD_PATHS.runtime
+ const PNPM_BUILD_STATE = BUILD_PATHS.dshPnpm
+ const PACKAGE_SET_ROOT = BUILD_PATHS.packageSet
+-const NODE = join(BUILD_PATHS.electron, process.platform === 'win32' ? 'electron.exe' : 'Electron.app/Contents/MacOS/Electron')
++const NODE = join(BUILD_PATHS.electron, process.platform === 'win32' ? 'electron.exe' : process.platform === 'linux' ? 'electron' : 'Electron.app/Contents/MacOS/Electron')
+ const PNPM = join(RUNTIME_ROOT, 'pnpm', 'bin', 'pnpm.mjs')
+ 
+ function manifestVersion(path: string, subject: string): string {
+diff --git a/apps/desktop/scripts/prepare-runtime.ts b/apps/desktop/scripts/prepare-runtime.ts
+index 1b88f09..147db06 100644
+--- a/apps/desktop/scripts/prepare-runtime.ts
++++ b/apps/desktop/scripts/prepare-runtime.ts
+@@ -8,7 +8,7 @@ import { dirname, join } from 'node:path'
+ import { parseArgs } from 'node:util'
+ import { downloadArtifact } from '@electron/get'
+ import extractZip from 'extract-zip'
+-import { resolveDesktopBuildTarget, resolveDesktopTargetBuildPaths } from './desktop-build-paths.mjs'
++import { desktopTargetPlatform, resolveDesktopBuildTarget, resolveDesktopTargetBuildPaths } from './desktop-build-paths.mjs'
+ import { preparePrimaryRuntime } from './prepare-primary-runtime.ts'
+ import { prepareDesktopCli } from './prepare-cli.ts'
+ import { prepareCommandLink } from './prepare-command-link.ts'
+@@ -31,15 +31,14 @@ function preparePnpm(): string {
+ async function main(): Promise<void> {
+   const { values } = parseArgs({ options: { 'defer-primary-runtime-smoke': { type: 'boolean', default: false } } })
+   const target = resolveDesktopBuildTarget()
+-  const platform = target.startsWith('mac-') ? 'darwin' : 'win32'
+-  const arch = target.endsWith('arm64') ? 'arm64' : 'x64'
++  const { platform, arch } = desktopTargetPlatform(target)
+   const require = createRequire(import.meta.url)
+   const { version } = require('electron/package.json') as { version: string }
+   const archive = await packagingStep(process.env.DSH_DESKTOP_PACKAGING_RUN_DIR, 'download:electron',
+     () => downloadArtifact({ version, platform, arch, artifactName: 'electron', cacheRoot: BUILD_PATHS.downloads }))
+   rmSync(BUILD_PATHS.electron, { recursive: true, force: true })
+   await packagingStep(process.env.DSH_DESKTOP_PACKAGING_RUN_DIR, 'extract:electron', () => extractZip(archive, { dir: BUILD_PATHS.electron }))
+-  const executable = join(BUILD_PATHS.electron, platform === 'win32' ? 'electron.exe' : 'Electron.app/Contents/MacOS/Electron')
++  const executable = join(BUILD_PATHS.electron, platform === 'win32' ? 'electron.exe' : platform === 'linux' ? 'electron' : 'Electron.app/Contents/MacOS/Electron')
+   const nodeVersion = execFileSync(executable, ['-p', 'process.versions.node'], {
+     encoding: 'utf8', env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+   }).trim()
+diff --git a/apps/desktop/scripts/tests/linux-build.test.mjs b/apps/desktop/scripts/tests/linux-build.test.mjs
+new file mode 100644
+index 0000000..2b985ed
+--- /dev/null
++++ b/apps/desktop/scripts/tests/linux-build.test.mjs
+@@ -0,0 +1,47 @@
++import assert from 'node:assert/strict'
++import { test } from 'node:test'
++import { join } from 'node:path'
++import { desktopTargetBuildPaths, desktopTargetPlatform, resolveDesktopBuildTarget } from '../desktop-build-paths.mjs'
++
++test('Linux preparation uses isolated linux-x64 paths and preserves existing target mappings', () => {
++  assert.equal(resolveDesktopBuildTarget({}, 'linux', 'x64'), 'linux-x64')
++  assert.deepEqual(desktopTargetPlatform('linux-x64'), { platform: 'linux', arch: 'x64' })
++  assert.ok(desktopTargetBuildPaths('linux-x64').runtime.endsWith(join('linux-x64', 'runtime')))
++  assert.deepEqual(desktopTargetPlatform('mac-arm64'), { platform: 'darwin', arch: 'arm64' })
++  assert.deepEqual(desktopTargetPlatform('win-x64'), { platform: 'win32', arch: 'x64' })
++  assert.throws(() => resolveDesktopBuildTarget({}, 'linux', 'arm64'), /unsupported/)
++})
++
++test('Linux packaging selects DEB and a stable GitHub Release feed for upstream RC versions', async () => {
++  const { createLinuxElectronBuilderConfig } = await import('../linux-electron-builder.mjs')
++  const config = createLinuxElectronBuilderConfig({ DSH_LINUX_OTA_REPOSITORY: 'example/linux-harness' })
++  assert.deepEqual(config.linux.target, [{ target: 'deb', arch: ['x64'] }])
++  assert.equal(config.linux.executableName, 'deepseek-harness')
++  assert.deepEqual(config.publish, [{ provider: 'generic', url: 'https://github.com/example/linux-harness/releases/latest/download/', channel: 'latest' }])
++  assert.equal(config.detectUpdateChannel, false)
++  assert.equal(config.generateUpdatesFilesForAllChannels, true)
++  assert.equal(config.extraMetadata.dshLinuxOtaRepository, 'example/linux-harness')
++  assert.equal(config.extraMetadata.dshDesktopAppId, config.appId)
++  assert.ok(config.deb.depends.includes('polkitd'))
++  assert.ok(config.deb.depends.includes('pkexec'))
++  for (const repository of [undefined, '', '../repo', 'https://github.com/user/repo', 'user/repo/other', 'user/repo?token=secret']) {
++    assert.throws(() => createLinuxElectronBuilderConfig({ DSH_LINUX_OTA_REPOSITORY: repository }), /DSH_LINUX_OTA_REPOSITORY/)
++  }
++})
++
++test('archive commit fallback accepts matching source identity and rejects stale records', async () => {
++  const { mkdtempSync, rmSync, writeFileSync } = await import('node:fs')
++  const { tmpdir } = await import('node:os')
++  const { linuxArchiveCommit } = await import('../linux-build-source.mjs')
++  const root = mkdtempSync(join(tmpdir(), 'linux-source-record-'))
++  try {
++    writeFileSync(join(root, 'package.json'), JSON.stringify({ version: '0.2.1-rc.2' }))
++    assert.throws(() => linuxArchiveCommit(root), /LINUX-SOURCE.json/)
++    for (const record of [{ version: '0.2.0', sha: 'a'.repeat(40) }, { version: '0.2.1-rc.2', sha: 'bad' }, null]) {
++      writeFileSync(join(root, 'LINUX-SOURCE.json'), JSON.stringify(record))
++      assert.throws(() => linuxArchiveCommit(root), /matching package version/)
++    }
++    writeFileSync(join(root, 'LINUX-SOURCE.json'), JSON.stringify({ version: '0.2.1-rc.2', sha: 'a'.repeat(40) }))
++    assert.equal(linuxArchiveCommit(root), 'a'.repeat(40))
++  } finally { rmSync(root, { recursive: true, force: true }) }
++})
+diff --git a/apps/desktop/src/linux-update.ts b/apps/desktop/src/linux-update.ts
+new file mode 100644
+index 0000000..2f4b59f
+--- /dev/null
++++ b/apps/desktop/src/linux-update.ts
+@@ -0,0 +1,44 @@
++/** Awaited, user-authorized DEB installation without launching Electron as root. */
++import { execFile } from 'node:child_process'
++import { isAbsolute } from 'node:path'
++
++/** Injectable process boundary; successful completion means dpkg exited with status zero. */
++export interface LinuxDebInstallOperations {
++  uid: () => number | undefined
++  execute: (file: string, args: readonly string[], environment: NodeJS.ProcessEnv) => Promise<void>
++}
++
++const operations: LinuxDebInstallOperations = {
++  uid: () => process.getuid?.(),
++  execute: (file, args, env) => new Promise((resolve, reject) => {
++    execFile(file, [...args], { env, encoding: 'utf8', maxBuffer: 1024 * 1024 }, (error, _stdout, stderr) => {
++      if (error === null) { resolve(); return }
++      const code = 'code' in error ? error.code : undefined
++      if (code === 126) reject(new Error('Linux update authorization was cancelled. The application remains open.'))
++      else if (code === 'ENOENT') reject(new Error('Linux update requires /usr/bin/pkexec (package pkexec) and a graphical authentication agent.'))
++      else reject(new Error(`Linux package installation failed (${String(code ?? 'signal')}). ${stderr.trim().slice(-4096)}`))
++    })
++  }),
++}
++
++/**
++ * Install only the main-process-owned package already verified by electron-updater.
++ * @param packagePath Absolute verified download filename; never supplied by a renderer.
++ * @param processOperations Process adapter used by the installed application or isolated tests.
++ * @param environment Session variables needed by the system authentication agent.
++ * @returns Resolves only after successful installation; cancellation and failure retain the application.
++ */
++export async function installLinuxDeb(
++  packagePath: string,
++  processOperations: LinuxDebInstallOperations = operations,
++  environment: NodeJS.ProcessEnv = process.env,
++): Promise<void> {
++  if (!isAbsolute(packagePath) || !packagePath.endsWith('.deb')) throw new Error('Linux update requires a verified absolute .deb filename')
++  if (processOperations.uid() === 0) throw new Error('Linux OTA must run as the desktop user. Start the application without sudo.')
++  // Package installation needs no harness credentials or user-controlled executable search path.
++  const env: NodeJS.ProcessEnv = { PATH: '/usr/sbin:/usr/bin:/sbin:/bin' }
++  for (const name of ['DISPLAY', 'WAYLAND_DISPLAY', 'XAUTHORITY', 'XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS', 'LANG', 'LC_ALL']) {
++    if (environment[name] !== undefined) env[name] = environment[name]
++  }
++  await processOperations.execute('/usr/bin/pkexec', ['/usr/bin/dpkg', '--install', packagePath], env)
++}
+diff --git a/apps/desktop/src/main.ts b/apps/desktop/src/main.ts
+index b4b8153..966e7bd 100644
+--- a/apps/desktop/src/main.ts
++++ b/apps/desktop/src/main.ts
+@@ -1257,6 +1257,7 @@ async function main(): Promise<void> {
+       .catch((error: unknown) => { console.error(error) }).finally(() => { app.quit() })
+   }
+   app.on('before-quit', (event) => {
++    if (updates.blocksQuit) { event.preventDefault(); return }
+     if (shellInstallerOwnsQuit) {
+       shuttingDown = true
+       quitConfirmation.dispose()
+diff --git a/apps/desktop/src/update-coordinator.ts b/apps/desktop/src/update-coordinator.ts
+index 8d6eb80..ff96d60 100644
+--- a/apps/desktop/src/update-coordinator.ts
++++ b/apps/desktop/src/update-coordinator.ts
+@@ -8,14 +8,26 @@ import { gt, valid } from 'semver'
+ import type { DesktopUpdateState } from './ipc.ts'
+ import { DesktopUpdateHttpExecutor } from './update-http-executor.ts'
+ import { DesktopUpdatePreparationError } from './update-error.ts'
+-
+-const { autoUpdater } = electronUpdater
++import { installLinuxDeb } from './linux-update.ts'
++
++/**
++ * Select DEB explicitly on Linux, retaining the official updater on other platforms.
++ * @param platform Desktop operating system.
++ * @returns Process-owned updater using the packaged app-update.yml configuration.
++ */
++export function createDesktopUpdater(platform: NodeJS.Platform = process.platform): AppUpdater {
++  return platform === 'linux' ? new electronUpdater.DebUpdater() : electronUpdater.autoUpdater
++}
+ 
+ /** Owns one updater target until its download and installation settle. */
+ export class DesktopUpdateCoordinator {
+   private current: DesktopUpdateState = { phase: 'idle' }
+   private candidate: string | undefined
+   private downloaded = false
++  private downloadedPackage: string | undefined
++  private linuxInstallPending = false
++  private readonly updater: AppUpdater
++  private readonly linuxInstallation: ((packagePath: string) => Promise<void>) | undefined
+   private disposed = false
+   private checkOperation: Promise<DesktopUpdateState> | undefined
+   private downloadOperation: Promise<DesktopUpdateState> | undefined
+@@ -46,27 +58,31 @@ export class DesktopUpdateCoordinator {
+    * @param enabled - Whether this process has a packaged update source.
+    * @param currentVersion - Actual installed application version.
+    * @param downloadResult - Once per completed download attempt, including platform preparation failures.
++   * @param linuxInstallation - Awaited DEB installation, enabled only for the Linux process-owned updater by default.
+    */
+   constructor(
+     private readonly publish: (state: DesktopUpdateState) => DesktopUpdateState,
+     private readonly beforeRestart: () => Promise<boolean>,
+-    private readonly updater: AppUpdater = autoUpdater,
++    updater?: AppUpdater,
+     private readonly enabled: () => boolean = () => app.isPackaged && existsSync(join(process.resourcesPath, 'app-update.yml')),
+     private readonly currentVersion: () => string = () => app.getVersion(),
+     private readonly downloadResult?: (success: boolean, reason?: string) => void,
++    linuxInstallation?: (packagePath: string) => Promise<void>,
+   ) {
+-    if (updater === autoUpdater) {
++    this.updater = updater ?? createDesktopUpdater()
++    this.linuxInstallation = linuxInstallation ?? (updater === undefined && process.platform === 'linux' ? installLinuxDeb : undefined)
++    if (updater === undefined) {
+       // electron-updater omits this internal transport property from its public declarations.
+       // Real-Electron qualification exercises the pinned dependency integration.
+-      const transportOwner = updater as AppUpdater & { httpExecutor: DesktopUpdateHttpExecutor }
++      const transportOwner = this.updater as AppUpdater & { httpExecutor: DesktopUpdateHttpExecutor }
+       transportOwner.httpExecutor = new DesktopUpdateHttpExecutor(
+         Number(process.env.DSH_DESKTOP_UPDATE_HTTP_IDLE_TIMEOUT_MS ?? 60_000),
+-        (authInfo, callback) => { updater.emit('login', authInfo, callback) },
++        (authInfo, callback) => { this.updater.emit('login', authInfo, callback) },
+       )
+     }
+     this.updater.autoDownload = false
+     this.updater.autoInstallOnAppQuit = false
+-    this.updater.channel = 'nightly'
++    this.updater.channel = this.linuxInstallation === undefined ? 'nightly' : 'latest'
+     this.updater.allowPrerelease = true
+     // Selecting a channel can enable downgrade in electron-updater.
+     this.updater.allowDowngrade = false
+@@ -78,6 +94,9 @@ export class DesktopUpdateCoordinator {
+   /** Latest observable state; complete download identity remains main-process-owned. */
+   get state(): DesktopUpdateState { return this.current }
+ 
++  /** Whether an awaited Linux privilege prompt or installation must prevent application exit. */
++  get blocksQuit(): boolean { return this.linuxInstallPending }
++
+   /**
+    * Check metadata without downloading, joining any current check.
+    * @param manual - Whether a failed check must remain visible in the status indicator.
+@@ -108,12 +127,17 @@ export class DesktopUpdateCoordinator {
+       if (version !== this.candidate) throw new Error('desktop update: download confirmation is stale')
+       this.setState({ phase: 'downloading', version, percent: 0 })
+       try {
+-        await this.updater.downloadUpdate()
++        const files = await this.updater.downloadUpdate()
++        if (this.linuxInstallation !== undefined) {
++          this.downloadedPackage = files.find(file => file.endsWith('.deb'))
++          if (this.downloadedPackage === undefined) throw new Error('desktop update: verified Linux DEB was not downloaded')
++        }
+         if (!this.downloaded) throw new Error('desktop update: platform preparation did not report readiness')
+         this.downloadResult?.(true)
+         return this.setState({ phase: 'ready', version })
+       } catch (error) {
+         this.downloaded = false
++        this.downloadedPackage = undefined
+         this.downloadResult?.(false, error instanceof DesktopUpdatePreparationError ? error.kind : 'download_failed')
+         return this.setState(this.failure(error, 'download'))
+       }
+@@ -134,7 +158,18 @@ export class DesktopUpdateCoordinator {
+       try {
+         if (!await this.beforeRestart()) return this.setState({ phase: 'ready', version })
+         this.assertLive()
+-        this.updater.quitAndInstall(true, true)
++        if (this.linuxInstallation !== undefined) {
++          if (this.downloadedPackage === undefined) throw new Error('desktop update: verified Linux package is unavailable')
++          this.linuxInstallPending = true
++          try { await this.linuxInstallation(this.downloadedPackage) }
++          finally { this.linuxInstallPending = false }
++          this.assertLive()
++          // This process still has the desktop user's uid; no elevated process launches Electron.
++          app.relaunch({ execPath: process.execPath, args: [] })
++          app.quit()
++        } else {
++          this.updater.quitAndInstall(true, true)
++        }
+         return this.current
+       } catch (error) {
+         if (this.current.phase === 'error' && this.current.failedOperation === 'install') return this.current
+diff --git a/apps/desktop/tests/cli-launcher.spec.ts b/apps/desktop/tests/cli-launcher.spec.ts
+index 67e38da..8949eda 100644
+--- a/apps/desktop/tests/cli-launcher.spec.ts
++++ b/apps/desktop/tests/cli-launcher.spec.ts
+@@ -8,7 +8,7 @@ import { dirname, join, relative } from 'node:path'
+ import { expect, it, onTestFinished } from 'vitest'
+ import { prepareDesktopCli } from '../scripts/prepare-cli.ts'
+ 
+-function fixture() {
++function fixture(platform: 'darwin' | 'win32' | 'linux' = process.platform === 'win32' ? 'win32' : 'darwin') {
+   const root = realpathSync(mkdtempSync(join(tmpdir(), 'dsh-cli-launcher-')))
+   const children: ChildProcessWithoutNullStreams[] = []
+   const exits: Promise<unknown>[] = []
+@@ -20,11 +20,10 @@ function fixture() {
+     await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })
+   })
+   const application = join(root, 'Application 中文 with spaces.app')
+-  const platform = process.platform === 'win32' ? 'win32' : 'darwin'
+   const resources = join(application, ...platform === 'darwin' ? ['Contents', 'Resources'] : ['resources'])
+   const cli = join(resources, 'runtime', 'cli')
+   prepareDesktopCli(cli, platform)
+-  const electron = join(application, ...platform === 'darwin' ? ['Contents', 'MacOS', 'DeepSeek Harness'] : ['DeepSeek Harness.exe'])
++  const electron = join(application, ...platform === 'darwin' ? ['Contents', 'MacOS', 'DeepSeek Harness'] : [platform === 'linux' ? 'deepseek-harness' : 'DeepSeek Harness.exe'])
+   mkdirSync(dirname(electron), { recursive: true })
+   if (platform === 'win32') copyFileSync(process.execPath, electron)
+   else symlinkSync(process.execPath, electron)
+@@ -85,3 +84,12 @@ it.skipIf(process.platform === 'win32')('resolves chained command symlinks witho
+   expect(await run.closed, run.stderr()).toBe(23)
+   expect(JSON.parse(run.stdout())).toMatchObject({ args, cwd: f.root, nodeMode: '1' })
+ })
++
++it.skipIf(process.platform === 'win32')('Linux launcher locates the installed executable and preserves literal arguments', async () => {
++  const f = fixture('linux')
++  const args = ['hello world', '中文', '$HOME', '`literal`', '']
++  const run = f.start(args)
++  run.child.stdin.end()
++  expect(await run.closed, run.stderr()).toBe(23)
++  expect(JSON.parse(run.stdout())).toMatchObject({ args, cwd: f.root, nodeMode: '1' })
++})
+diff --git a/apps/desktop/tests/desktop-build-paths.spec.ts b/apps/desktop/tests/desktop-build-paths.spec.ts
+index a5e9faf..e7c745e 100644
+--- a/apps/desktop/tests/desktop-build-paths.spec.ts
++++ b/apps/desktop/tests/desktop-build-paths.spec.ts
+@@ -54,7 +54,7 @@ describe('desktop build paths', () => {
+     expect(desktopTargetPlatform('mac-arm64')).toEqual({ platform: 'darwin', arch: 'arm64' })
+     expect(desktopTargetPlatform('mac-x64')).toEqual({ platform: 'darwin', arch: 'x64' })
+     expect(desktopTargetPlatform('win-x64')).toEqual({ platform: 'win32', arch: 'x64' })
+-    expect(() => desktopTargetPlatform('linux-x64' as 'mac-x64')).toThrow(/unsupported target/u)
++    expect(desktopTargetPlatform('linux-x64')).toEqual({ platform: 'linux', arch: 'x64' })
+   })
+ 
+   it('resolves environment overrides and rejects unsupported targets', () => {
+@@ -63,7 +63,7 @@ describe('desktop build paths', () => {
+       DSH_DESKTOP_TARGET_ARCH: 'x64',
+     }, 'darwin', 'arm64')).toBe('mac-x64')
+     expect(resolveDesktopBuildTarget({}, 'win32', 'x64')).toBe('win-x64')
+-    expect(() => resolveDesktopBuildTarget({}, 'linux', 'x64')).toThrow(/unsupported target/u)
+-    expect(() => desktopTargetBuildPaths('linux-x64' as 'mac-x64')).toThrow(/unsupported target/u)
++    expect(resolveDesktopBuildTarget({}, 'linux', 'x64')).toBe('linux-x64')
++    expect(() => desktopTargetBuildPaths('linux-arm64' as 'mac-x64')).toThrow(/unsupported target/u)
+   })
+ })
+diff --git a/apps/desktop/tests/linux-update.spec.ts b/apps/desktop/tests/linux-update.spec.ts
+new file mode 100644
+index 0000000..488a8ac
+--- /dev/null
++++ b/apps/desktop/tests/linux-update.spec.ts
+@@ -0,0 +1,35 @@
++import { describe, expect, it, vi } from 'vitest'
++import { installLinuxDeb } from '../src/linux-update.ts'
++
++describe('Linux privilege boundary', () => {
++  it('awaits pkexec with an absolute dpkg executable, literal filename, and scrubbed session environment', async () => {
++    const completed = Promise.withResolvers<void>()
++    const execute = vi.fn(() => completed.promise)
++    const pending = installLinuxDeb('/cache/package $(touch unwanted).deb', { uid: () => 1000, execute }, {
++      DISPLAY: ':0', DBUS_SESSION_BUS_ADDRESS: 'session', DEEPSEEK_API_KEY: 'secret',
++      GITHUB_TOKEN: 'secret', PATH: '/untrusted', NODE_OPTIONS: '--inspect',
++    })
++    expect(execute).toHaveBeenCalledExactlyOnceWith('/usr/bin/pkexec', ['/usr/bin/dpkg', '--install', '/cache/package $(touch unwanted).deb'], {
++      PATH: '/usr/sbin:/usr/bin:/sbin:/bin', DISPLAY: ':0', DBUS_SESSION_BUS_ADDRESS: 'session',
++    })
++    let settled = false
++    void pending.then(() => { settled = true })
++    await Promise.resolve()
++    expect(settled).toBe(false)
++    completed.resolve()
++    await pending
++  })
++
++  it.each(['authentication cancelled', 'package installation failed'])('propagates %s without treating it as installation success', async (message) => {
++    const execute = vi.fn(async () => { throw new Error(message) })
++    await expect(installLinuxDeb('/cache/package.deb', { uid: () => 1000, execute })).rejects.toThrow(message)
++  })
++
++  it('refuses root execution and filenames outside the verified DEB path', async () => {
++    const execute = vi.fn(async () => {})
++    await expect(installLinuxDeb('/cache/package.deb', { uid: () => 0, execute })).rejects.toThrow(/without sudo/u)
++    await expect(installLinuxDeb('relative.deb', { uid: () => 1000, execute })).rejects.toThrow(/absolute/u)
++    await expect(installLinuxDeb('/cache/package.AppImage', { uid: () => 1000, execute })).rejects.toThrow(/absolute/u)
++    expect(execute).not.toHaveBeenCalled()
++  })
++})
+diff --git a/apps/desktop/tests/update-coordinator.spec.ts b/apps/desktop/tests/update-coordinator.spec.ts
+index 790ad63..1ff1e6f 100644
+--- a/apps/desktop/tests/update-coordinator.spec.ts
++++ b/apps/desktop/tests/update-coordinator.spec.ts
+@@ -1,18 +1,19 @@
+ import { EventEmitter } from 'node:events'
+ import { afterEach, describe, expect, it, vi } from 'vitest'
+-import type { AppUpdater } from 'electron-updater'
++import electronUpdater, { type AppUpdater } from 'electron-updater'
++import { app } from 'electron'
+ import { DESKTOP_HOST_PROTOCOL_VERSION } from '../src/host-protocol.ts'
+ import { parseDesktopRelease } from '../src/release.ts'
+ import type { DesktopUpdateState } from '../src/ipc.ts'
+ import { DesktopUpdatePreparationError } from '../src/update-error.ts'
+ import { zh } from '../src/locale.ts'
+ 
+-vi.mock('electron', () => ({ app: { isPackaged: false } }))
++vi.mock('electron', () => ({ app: { isPackaged: false, relaunch: vi.fn(), quit: vi.fn() } }))
+ vi.mock('electron-updater', () => ({
+-  default: { autoUpdater: { autoDownload: true, autoInstallOnAppQuit: true } },
++  default: { autoUpdater: { autoDownload: true, autoInstallOnAppQuit: true }, DebUpdater: class { kind = 'deb' } },
+ }))
+ 
+-const { DesktopUpdateCoordinator } = await import('../src/update-coordinator.ts')
++const { DesktopUpdateCoordinator, createDesktopUpdater } = await import('../src/update-coordinator.ts')
+ 
+ describe('desktop release metadata', () => {
+   it('accepts one exact release identity for Electron and dsh', () => {
+@@ -47,7 +48,7 @@ describe('desktop release metadata', () => {
+ const coordinators: InstanceType<typeof DesktopUpdateCoordinator>[] = []
+ afterEach(() => { for (const item of coordinators.splice(0)) item.dispose() })
+ 
+-function fixture() {
++function fixture(linuxInstallation?: (path: string) => Promise<void>) {
+   const events = new EventEmitter()
+   const checkForUpdates = vi.fn(async () => ({
+     isUpdateAvailable: true,
+@@ -57,7 +58,7 @@ function fixture() {
+     events.emit('download-progress', { percent: 58 })
+     events.emit('download-progress', { percent: 100 })
+     events.emit('update-downloaded', { version: '1.1.0-rc.2' })
+-    return ['verified-package']
++    return ['/verified-package.deb']
+   })
+   const quitAndInstall = vi.fn()
+   const beforeRestart = vi.fn(async () => true)
+@@ -66,7 +67,7 @@ function fixture() {
+   const updater = Object.assign(events, { checkForUpdates, downloadUpdate, quitAndInstall }) as unknown as AppUpdater
+   const coordinator = new DesktopUpdateCoordinator(
+     (state) => { states.push(state); return state },
+-    beforeRestart, updater, () => true, () => '1.1.0-alpha.1', downloadResult,
++    beforeRestart, updater, () => true, () => '1.1.0-alpha.1', downloadResult, linuxInstallation,
+   )
+   coordinators.push(coordinator)
+   return { coordinator, updater, events, states, checkForUpdates, downloadUpdate, quitAndInstall, beforeRestart, downloadResult }
+@@ -242,3 +243,61 @@ it.each([new DesktopUpdatePreparationError('stop-failed', 'private diagnostic'),
+   expect(f.downloadResult).toHaveBeenCalledExactlyOnceWith(false, error instanceof DesktopUpdatePreparationError ? 'stop-failed' : 'download_failed')
+   expect(JSON.stringify(f.downloadResult.mock.calls)).not.toContain('private')
+ })
++
++
++describe('Linux DEB OTA handoff', () => {
++  afterEach(() => { vi.clearAllMocks() })
++
++  it('selects DEB on Linux and preserves the official updater on Windows and macOS', () => {
++    expect(createDesktopUpdater('linux')).toMatchObject({ kind: 'deb' })
++    expect(createDesktopUpdater('win32')).toBe(electronUpdater.autoUpdater)
++    expect(createDesktopUpdater('darwin')).toBe(electronUpdater.autoUpdater)
++  })
++
++  it('waits for successful installation before a user-owned restart and quit', async () => {
++    const installed = Promise.withResolvers<void>()
++    const install = vi.fn(() => installed.promise)
++    const f = fixture(install)
++    expect(f.updater.channel).toBe('latest')
++    await f.coordinator.check()
++    await f.coordinator.download('1.1.0-rc.2')
++    const installing = f.coordinator.install('1.1.0-rc.2')
++    await vi.waitFor(() => { expect(install).toHaveBeenCalledWith('/verified-package.deb') })
++    expect(f.beforeRestart).toHaveBeenCalledOnce()
++    expect(f.coordinator.blocksQuit).toBe(true)
++    expect(app.relaunch).not.toHaveBeenCalled()
++    expect(app.quit).not.toHaveBeenCalled()
++    installed.resolve()
++    await installing
++    expect(f.coordinator.blocksQuit).toBe(false)
++    expect(app.relaunch).toHaveBeenCalledExactlyOnceWith({ execPath: process.execPath, args: [] })
++    expect(app.quit).toHaveBeenCalledOnce()
++    expect(f.quitAndInstall).not.toHaveBeenCalled()
++  })
++
++  it.each(['authorization cancelled', 'dpkg failed'])('retains the process and permits retry after %s', async (reason) => {
++    const install = vi.fn< (path: string) => Promise<void> >().mockRejectedValueOnce(new Error(reason)).mockResolvedValueOnce()
++    const f = fixture(install)
++    await f.coordinator.check()
++    await f.coordinator.download('1.1.0-rc.2')
++    expect(await f.coordinator.install('1.1.0-rc.2')).toMatchObject({ phase: 'error', failedOperation: 'install', message: reason })
++    expect(f.coordinator.blocksQuit).toBe(false)
++    expect(app.relaunch).not.toHaveBeenCalled()
++    expect(app.quit).not.toHaveBeenCalled()
++    expect(f.quitAndInstall).not.toHaveBeenCalled()
++    await f.coordinator.install('1.1.0-rc.2')
++    expect(f.downloadUpdate).toHaveBeenCalledOnce()
++    expect(app.quit).toHaveBeenCalledOnce()
++  })
++
++  it('does not request system authorization after task-shutdown confirmation is cancelled', async () => {
++    const install = vi.fn(async (_path: string) => {})
++    const f = fixture(install)
++    f.beforeRestart.mockResolvedValueOnce(false)
++    await f.coordinator.check()
++    await f.coordinator.download('1.1.0-rc.2')
++    expect(await f.coordinator.install('1.1.0-rc.2')).toMatchObject({ phase: 'ready' })
++    expect(install).not.toHaveBeenCalled()
++    expect(app.quit).not.toHaveBeenCalled()
++  })
++})
+diff --git a/build-linux-amd64-deb.sh b/build-linux-amd64-deb.sh
+new file mode 100755
+index 0000000..7ddb1f6
+--- /dev/null
++++ b/build-linux-amd64-deb.sh
+@@ -0,0 +1,85 @@
++#!/usr/bin/env bash
++# Build a public GitHub Release OTA package on Ubuntu 24.04 amd64.
++set -euo pipefail
++cd -- "$(dirname -- "${BASH_SOURCE[0]}")"
++
++if ! command -v node >/dev/null 2>&1; then
++  echo 'Node.js is missing. Install Node ^22.19.0 or >=24 and enable Corepack, then retry.' >&2
++  exit 1
++fi
++node --input-type=module <<'JS'
++const [major, minor] = process.versions.node.split('.').map(Number)
++if (!((major === 22 && minor >= 19) || major >= 24)) throw new Error('Node ^22.19.0 or >=24 is required')
++if (process.platform !== 'linux' || process.arch !== 'x64') throw new Error('Run this build on Linux amd64 (Ubuntu 24.04)')
++const { linuxOtaRepository } = await import('./apps/desktop/scripts/linux-electron-builder.mjs')
++linuxOtaRepository()
++JS
++if command -v pnpm >/dev/null 2>&1; then
++  package_manager=(pnpm)
++elif command -v corepack >/dev/null 2>&1; then
++  package_manager=(corepack pnpm)
++else
++  echo 'Corepack/pnpm is missing. Enable Corepack or install the pnpm version in package.json.' >&2
++  exit 1
++fi
++expected_pnpm=$(node -p 'JSON.parse(require("node:fs").readFileSync("package.json", "utf8")).packageManager.replace("pnpm@", "")')
++actual_pnpm=$("${package_manager[@]}" --version)
++if [[ "$actual_pnpm" != "$expected_pnpm" ]]; then
++  echo "pnpm $expected_pnpm is required; found $actual_pnpm." >&2
++  exit 1
++fi
++# Downloaded source archives record their official commit without requiring Git metadata.
++if [[ -z "${DSH_CLIENT_COMMIT_HASH:-}" ]]; then
++  source_git_root=$(git rev-parse --show-toplevel 2>/dev/null || true)
++  if [[ "$source_git_root" != "$(pwd -P)" ]]; then
++    DSH_CLIENT_COMMIT_HASH=$(node --input-type=module <<'JS'
++import { linuxArchiveCommit } from './apps/desktop/scripts/linux-build-source.mjs'
++process.stdout.write(linuxArchiveCommit(process.cwd()))
++JS
++)
++    export DSH_CLIENT_COMMIT_HASH
++  fi
++fi
++export DSH_DESKTOP_TARGET_PLATFORM=linux
++export DSH_DESKTOP_TARGET_ARCH=x64
++unset DSH_DESKTOP_UNSIGNED DSH_DESKTOP_BUILD_VERSION
++
++"${package_manager[@]}" install --frozen-lockfile
++"${package_manager[@]}" run build:official
++build_root="$PWD/apps/desktop/.desktop-build/targets/linux-x64"
++"${package_manager[@]}" run release:pack --family dsh --out "$build_root/packed/dsh"
++"${package_manager[@]}" --dir apps/desktop-host pack --pack-destination "$build_root/packed/dsh"
++"${package_manager[@]}" run release:pack --family vendor --out "$build_root/packed/vendor"
++rm -rf -- "$build_root/packed/landlock"
++mkdir -p -- "$build_root/packed/landlock"
++"${package_manager[@]}" --dir native/system run build:ts
++"${package_manager[@]}" --dir native/system/packages/entry pack --pack-destination "$build_root/packed/landlock"
++"${package_manager[@]}" --dir apps/desktop run prepare:runtime
++"${package_manager[@]}" --dir apps/desktop run prepare:packages
++"${package_manager[@]}" --dir apps/desktop run prepare:dsh
++# The output directory belongs only to this Linux build; stale packages must never reach a release.
++rm -rf -- "$PWD/dist/linux-ota"
++"${package_manager[@]}" --dir apps/desktop exec electron-builder --linux deb --x64 --publish never --config scripts/linux-electron-builder.mjs
++cp -- dist/linux-ota/linux-unpacked/resources/app-update.yml dist/linux-ota/app-update.yml
++node --input-type=module <<'JS'
++import { createHash } from 'node:crypto'
++import { readFileSync, readdirSync, statSync } from 'node:fs'
++import { join } from 'node:path'
++import yaml from 'js-yaml'
++const output = 'dist/linux-ota'
++const packages = readdirSync(output).filter(file => file.endsWith('.deb'))
++if (packages.length !== 1) throw new Error(`Expected one DEB; found ${packages.length}`)
++const file = packages[0]
++const bytes = readFileSync(join(output, file))
++const sha512 = createHash('sha512').update(bytes).digest('base64')
++const metadata = yaml.load(readFileSync(join(output, 'latest-linux.yml'), 'utf8'))
++const version = JSON.parse(readFileSync('apps/desktop/package.json', 'utf8')).version
++if (metadata.version !== version || metadata.files?.length !== 1 || metadata.files[0].url !== file
++  || metadata.files[0].sha512 !== sha512 || metadata.files[0].size !== statSync(join(output, file)).size
++  || (metadata.sha512 !== undefined && metadata.sha512 !== sha512)) throw new Error('Generated OTA metadata does not describe the DEB')
++const update = yaml.load(readFileSync(join(output, 'app-update.yml'), 'utf8'))
++const expected = `https://github.com/${process.env.DSH_LINUX_OTA_REPOSITORY}/releases/latest/download/`
++if (update.provider !== 'generic' || update.channel !== 'latest' || update.url !== expected) throw new Error('Packaged OTA feed is incorrect')
++console.log(`Verified ${file}, latest-linux.yml, and packaged app-update.yml in ${output}`)
++JS
++echo 'Linux build finished. Upload the DEB and latest-linux.yml together to a public, non-prerelease distribution GitHub Release.'

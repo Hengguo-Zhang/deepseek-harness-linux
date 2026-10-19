@@ -1,0 +1,163 @@
+name: Linux official tracking and OTA
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/linux-ota.yml'
+      - 'linux-distribution/**'
+  schedule:
+    - cron: '23 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: 'Optional official tag, e.g. dsh-v0.2.1-rc.2; empty selects newest'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-ota-publication
+  cancel-in-progress: false
+
+jobs:
+  discover:
+    runs-on: ubuntu-24.04
+    outputs:
+      build: ${{ steps.track.outputs.build }}
+      sha: ${{ steps.track.outputs.sha }}
+      version: ${{ steps.track.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.19.0'
+      - name: Test tracker and discover official version
+        id: track
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DSH_UPSTREAM_TAG: ${{ inputs.upstream_tag }}
+          DSH_TRACK_PRERELEASES: ${{ vars.DSH_TRACK_PRERELEASES || 'true' }}
+          DSH_UPSTREAM_SOURCE: ${{ vars.DSH_UPSTREAM_SOURCE || 'tags' }}
+        run: |
+          node --test linux-distribution/tests/*.test.mjs
+          node linux-distribution/tracking.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-tracking-plan
+          path: linux-plan.json
+          if-no-files-found: error
+          retention-days: 14
+
+  build:
+    needs: discover
+    if: needs.discover.outputs.build == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: distribution
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: deepseek-ai/deepseek-harness
+          ref: ${{ needs.discover.outputs.sha }}
+          path: upstream
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-tracking-plan
+          path: tracking
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.19.0'
+      - name: Install Ubuntu packaging prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential python3 pkg-config libx11-dev libxkbfile-dev libsecret-1-dev libnss3 libatk-bridge2.0-0t64 libdrm2 libgbm1 libasound2t64 fakeroot dpkg-dev libarchive-tools rpm
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: upstream/package.json
+          run_install: false
+      - name: Check official source and apply maintained Linux patch
+        working-directory: upstream
+        env:
+          EXPECTED_SHA: ${{ needs.discover.outputs.sha }}
+          EXPECTED_VERSION: ${{ needs.discover.outputs.version }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          node --input-type=module -e 'import fs from "node:fs"; for (const path of ["package.json", "apps/desktop/package.json"]) { if (JSON.parse(fs.readFileSync(path)).version !== process.env.EXPECTED_VERSION) throw new Error(`${path} version differs from official tag`); }'
+          applied=false
+          for patch in ../distribution/linux-distribution/patches/linux-amd64-0.2.1.patch ../distribution/linux-distribution/patches/linux-amd64.patch; do
+            if git apply --check "$patch"; then
+              git apply "$patch"
+              printf '%s\n' "$patch" > ../tracking/applied-patch.txt
+              applied=true
+              break
+            fi
+          done
+          if [ "$applied" != true ]; then
+            echo 'Official source changed: refresh the Linux patch and review before publishing.' >&2
+            exit 1
+          fi
+      - name: Build DEB and updater metadata without release credentials
+        working-directory: upstream
+        env:
+          DSH_LINUX_OTA_REPOSITORY: ${{ github.repository }}
+        run: bash ./build-linux-amd64-deb.sh
+      - name: Validate release assets
+        run: |
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';
+          import path from 'node:path';
+          import { createHash } from 'node:crypto';
+          const plan = JSON.parse(fs.readFileSync('tracking/linux-plan.json', 'utf8'));
+          const selectedPatch = path.basename(fs.readFileSync('tracking/applied-patch.txt', 'utf8').trim());
+          const patchSha256 = createHash('sha256').update(fs.readFileSync(`distribution/linux-distribution/patches/${selectedPatch}`)).digest('hex');
+          fs.writeFileSync('upstream/dist/linux-ota/linux-source.json', JSON.stringify({ ...plan, linuxPatch: selectedPatch, patchSha256 }, null, 2) + '\n');
+          JS
+          node distribution/linux-distribution/verify-artifacts.mjs upstream/dist/linux-ota tracking/linux-plan.json
+          dpkg-deb --info upstream/dist/linux-ota/*.deb
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-ota-assets
+          path: |
+            upstream/dist/linux-ota/*.deb
+            upstream/dist/linux-ota/latest-linux.yml
+            upstream/dist/linux-ota/app-update.yml
+            upstream/dist/linux-ota/linux-source.json
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    needs: [discover, build]
+    if: needs.discover.outputs.build == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.19.0'
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-tracking-plan
+          path: tracking
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-ota-assets
+          path: release-assets
+      - name: Upload draft assets then publish the complete feed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node linux-distribution/publish.mjs release-assets tracking/linux-plan.json
