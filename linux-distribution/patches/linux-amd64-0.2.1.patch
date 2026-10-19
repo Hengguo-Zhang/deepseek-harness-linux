@@ -1,3 +1,64 @@
+diff --git a/apps/desktop-host/src/office-engine.ts b/apps/desktop-host/src/office-engine.ts
+index f58019d..65f71f9 100644
+--- a/apps/desktop-host/src/office-engine.ts
++++ b/apps/desktop-host/src/office-engine.ts
+@@ -24,8 +24,10 @@ export function installOfficeEngineResolution(runtimeDir: string): ModuleHooks |
+   if (runtimeArchivePath(runtimeDir) === undefined) return undefined
+   const root = realpathSync(runtimeDir)
+   const archive = dirname(root)
+-  const source = pathToFileURL(join(root, 'node_modules', '@deepseek-ai', 'libreoffice-kit-')).href
+-  const destination = pathToFileURL(join(`${archive}.unpacked`, relative(archive, root), 'node_modules', '@deepseek-ai', 'libreoffice-kit-')).href
++  const linux = process.platform === 'linux'
++  const prefix = linux ? 'libreoffice-kit' : 'libreoffice-kit-'
++  const source = pathToFileURL(join(root, 'node_modules', '@deepseek-ai', prefix)).href
++  const destination = pathToFileURL(join(`${archive}.unpacked`, relative(archive, root), 'node_modules', '@deepseek-ai', prefix)).href
+   return registerHooks({
+     resolve(specifier, context, nextResolve) {
+       const resolved = nextResolve(specifier, context)
+@@ -33,7 +35,12 @@ export function installOfficeEngineResolution(runtimeDir: string): ModuleHooks |
+       const engineRequest = /^@deepseek-ai\/libreoffice-kit-(?:darwin|win32|linux)-/u.test(specifier)
+       const engineTarget = /\/node_modules\/@deepseek-ai\/libreoffice-kit-(?:darwin|win32|linux)-[^/]+\//u
+         .test(new URL(resolved.url).pathname)
+-      if (!engineRequest && !engineTarget) return resolved
++      // Electron returns null for absent ASAR lstat probes; Linux's optional native-engine
++      // detection must run from physical API files so it can select its bundled WASM engine.
++      const linuxApi = linux && (specifier === '@deepseek-ai/libreoffice-kit'
++        || specifier.startsWith('@deepseek-ai/libreoffice-kit/')
++        || /\/node_modules\/@deepseek-ai\/libreoffice-kit\//u.test(new URL(resolved.url).pathname))
++      if (!engineRequest && !engineTarget && !linuxApi) return resolved
+       const canonical = pathToFileURL(realpathSync(fileURLToPath(resolved.url))).href
+       if (!canonical.startsWith(source)) {
+         if (canonical.startsWith(pathToFileURL(archive + '/').href)) {
+diff --git a/apps/desktop-host/tests/office-engine.spec.ts b/apps/desktop-host/tests/office-engine.spec.ts
+index 83c544d..028da9e 100644
+--- a/apps/desktop-host/tests/office-engine.spec.ts
++++ b/apps/desktop-host/tests/office-engine.spec.ts
+@@ -29,9 +29,11 @@ function fixture(runtimeName = 'dsh') {
+     mkdirSync(dirname(path), { recursive: true })
+     writeFileSync(path, JSON.stringify({ name: '@deepseek-ai/libreoffice-kit-darwin-arm64', path: realpathSync(dirname(path)) }))
+   }
+-  const api = join(runtime, 'node_modules/@deepseek-ai/libreoffice-kit/package.json')
+-  mkdirSync(dirname(api), { recursive: true })
+-  writeFileSync(api, '{"name":"@deepseek-ai/libreoffice-kit"}')
++  for (const base of [runtime, join(root, 'app.asar.unpacked', runtimeName)]) {
++    const api = join(base, 'node_modules/@deepseek-ai/libreoffice-kit/package.json')
++    mkdirSync(dirname(api), { recursive: true })
++    writeFileSync(api, '{"name":"@deepseek-ai/libreoffice-kit"}')
++  }
+   const require: (specifier: string) => unknown = createRequire(join(runtime, 'package.json'))
+   const hook = installOfficeEngineResolution(runtime)!
+   hooks.push(hook)
+@@ -137,3 +139,10 @@ it('leaves external engines and the archived WASM engine at their own locations'
+   expect(f.require('@deepseek-ai/libreoffice-kit-wasm/package.json'))
+     .toMatchObject({ path: realpathSync(dirname(wasm)) })
+ })
++
++it.skipIf(process.platform !== 'linux')('runs the Linux Office API from physical files so absent native engines permit WASM fallback', () => {
++  const f = fixture()
++  const physical = join(f.root, 'app.asar.unpacked', 'dsh', 'node_modules/@deepseek-ai/libreoffice-kit/package.json')
++  writeFileSync(physical, JSON.stringify({ name: '@deepseek-ai/libreoffice-kit', physical: true }))
++  expect(f.require('@deepseek-ai/libreoffice-kit/package.json')).toMatchObject({ physical: true })
++})
 diff --git a/apps/desktop/scripts/desktop-build-paths.d.mts b/apps/desktop/scripts/desktop-build-paths.d.mts
 index c7b8173..2d402a0 100644
 --- a/apps/desktop/scripts/desktop-build-paths.d.mts
@@ -880,10 +941,10 @@ index 1c6e9da..0173bbe 100644
  })
 diff --git a/build-linux-amd64-deb.sh b/build-linux-amd64-deb.sh
 new file mode 100755
-index 0000000..7ddb1f6
+index 0000000..3f98506
 --- /dev/null
 +++ b/build-linux-amd64-deb.sh
-@@ -0,0 +1,85 @@
+@@ -0,0 +1,93 @@
 +#!/usr/bin/env bash
 +# Build a public GitHub Release OTA package on Ubuntu 24.04 amd64.
 +set -euo pipefail
@@ -946,6 +1007,14 @@ index 0000000..7ddb1f6
 +# The output directory belongs only to this Linux build; stale packages must never reach a release.
 +rm -rf -- "$PWD/dist/linux-ota"
 +"${package_manager[@]}" --dir apps/desktop exec electron-builder --linux deb --x64 --publish never --config scripts/linux-electron-builder.mjs
++node --import tsx/esm --input-type=module <<'JS'
++import { resolve, join } from 'node:path'
++import { readDesktopRuntime } from './apps/desktop/src/runtime-tree.ts'
++import { smokePreparedRuntime } from './apps/desktop/scripts/smoke-prepared-runtime.ts'
++const application = resolve('dist/linux-ota/linux-unpacked')
++await smokePreparedRuntime(join(application, 'resources/app.asar/dsh'), join(application, 'deepseek-harness'),
++  join(application, 'resources/runtime'), readDesktopRuntime(resolve('apps/desktop/.desktop-build/targets/linux-x64/dsh')))
++JS
 +cp -- dist/linux-ota/linux-unpacked/resources/app-update.yml dist/linux-ota/app-update.yml
 +node --input-type=module <<'JS'
 +import { createHash } from 'node:crypto'
