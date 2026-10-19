@@ -102,6 +102,6 @@ node --check linux-distribution/publish.mjs
 bash -n build-linux-amd64-deb.sh
 ```
 
-追踪测试覆盖版本排序、RC 策略、手动标签、已发布版本跳过、草稿重试和已公开不完整版本拒绝；资源测试覆盖不可变下载地址、内容篡改、路径越界、feed/版本/源码记录不一致。完整 DEB 构建还需要网络下载官方包依赖和 Electron。公开 Release 创建、GitHub Latest 重定向、真实下载、图形授权、安装及重启必须在配置好的公开仓库和 Ubuntu 桌面上完成端到端验证。没有外部发布凭据和托管资源时，不能声称这些步骤已实测通过。
+追踪测试覆盖版本排序、RC 策略、手动标签、已发布版本跳过、草稿重试和已公开不完整版本拒绝；资源测试覆盖不可变下载地址、内容篡改、路径越界、feed/版本/源码记录不一致。完整 DEB 构建还需要网络下载官方包依赖和 Electron。`Hengguo-Zhang/deepseek-harness-linux` 已实测公开 Release 创建、GitHub Latest 重定向和真实下载（`linux-v0.2.1-rc.2`）；图形授权窗口、安装后重启仍需在 Ubuntu 桌面上点击确认，未自动化。
 
 SHA-512 用于检验下载内容是否符合 feed，不能替代独立签名；分发仓库及其发布权限是更新信任来源。请保护仓库写权限，并审阅官方新版本与 Linux 补丁后使用。
