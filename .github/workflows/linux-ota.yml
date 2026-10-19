@@ -20,7 +20,7 @@ permissions:
 
 concurrency:
   group: linux-ota-publication
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   discover:
@@ -112,6 +112,18 @@ jobs:
         env:
           DSH_LINUX_OTA_REPOSITORY: ${{ github.repository }}
         run: bash ./build-linux-amd64-deb.sh
+      - name: Qualify the packaged Linux application before release
+        working-directory: upstream
+        run: |
+          node --import tsx/esm --input-type=module <<'JS'
+          import { join, resolve } from 'node:path'
+          import { smokePreparedRuntime } from './apps/desktop/scripts/smoke-prepared-runtime.ts'
+          import { readDesktopRuntime } from './apps/desktop/src/runtime-tree.ts'
+          const application = resolve('dist/linux-ota/linux-unpacked')
+          const resources = join(application, 'resources')
+          const descriptor = readDesktopRuntime(resolve('apps/desktop/.desktop-build/targets/linux-x64/dsh'))
+          await smokePreparedRuntime(join(resources, 'app.asar', 'dsh'), join(application, 'deepseek-harness'), join(resources, 'runtime'), descriptor)
+          JS
       - name: Validate release assets
         run: |
           node --input-type=module <<'JS'
