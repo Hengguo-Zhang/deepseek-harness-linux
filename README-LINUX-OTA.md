@@ -29,13 +29,15 @@ git push -u origin main
 | `DSH_TRACK_PRERELEASES` | `true` | 跟踪官方 RC。设为 `false` 仅接受稳定语义版本标签。 |
 | `DSH_UPSTREAM_SOURCE` | `tags` | 从官方 tags 选择版本；设为 `releases` 仅接受已有非草稿 GitHub Release 的 tags。 |
 
+版本线固定：定时触发和留空 `upstream_tag` 的手动触发都只在最近一次成功发布的 `major.minor.patch` 线内推进，避免上游出现更高编号的新基线时把未适配的补丁推上发布，也避免每 6 小时重复失败；跨线只通过显式 `upstream_tag` 完成。
+
 官方来源固定为 `deepseek-ai/deepseek-harness`。不需要配置 DeepSeek API Key、云存储密钥或个人 GitHub Token；同仓库发布使用 GitHub 自动提供的 `GITHUB_TOKEN`。若组织策略限制写入，允许此工作流的 `publish` 作业使用 `contents: write`。发现和构建作业只有仓库读取权限；构建步骤不注入发布令牌，源码检出后不保存 Git 凭据。组织若要求更严格的令牌隔离，可进一步将构建放入独立仓库；第三方 Actions 自身仍由 GitHub 提供作业运行环境。
 
 Linux feed 在构建时自动写为 `https://github.com/YOUR_NAME/deepseek-harness-linux/releases/latest/download/`，不需要手改应用源码。`DSH_LINUX_OTA_REPOSITORY` 是**本机构建参数**；Actions 直接使用当前分发仓库名，避免把更新发到另一个仓库。公开分发不需要把访问令牌放入桌面应用。
 
 ## 3. 第一次发布与安装
 
-在 **Actions → Linux official tracking and OTA → Run workflow** 运行。`upstream_tag` 留空会选择符合策略的最新语义版本；也可输入已存在的官方标签，例如 `dsh-v0.2.1-rc.2`。分支名、任意提交和非版本标签不会作为手动更新目标。
+在 **Actions → Linux official tracking and OTA → Run workflow** 运行。`upstream_tag` 留空时，工作流只在**当前已发布的版本线**（`linux-v…` Release 的 `major.minor.patch`，例如 `0.2.1`）内选择最新语义版本；需要切换到新的版本基线（例如从 `0.2.1` 跨到 `0.2.2`）时，必须在 `upstream_tag` 中显式指定官方标签，例如 `dsh-v0.2.2-alpha.2`。采纳一次后，后续自动跟踪随新线推进。分支名、任意提交和非版本标签不会作为手动更新目标。
 
 工作流解析版本大小而不是依赖标签返回顺序，固定官方提交 SHA，再核对根包和桌面包版本。随后按顺序检查维护的 `linux-amd64-0.2.1.patch`、`linux-amd64.patch`，只应用能够完整通过 `git apply --check` 的补丁。二者都不适用时停止；不会忽略失败片段或发布未经补丁的新版本。
 
@@ -102,6 +104,6 @@ node --check linux-distribution/publish.mjs
 bash -n build-linux-amd64-deb.sh
 ```
 
-追踪测试覆盖版本排序、RC 策略、手动标签、已发布版本跳过、草稿重试和已公开不完整版本拒绝；资源测试覆盖不可变下载地址、内容篡改、路径越界、feed/版本/源码记录不一致。完整 DEB 构建还需要网络下载官方包依赖和 Electron。`Hengguo-Zhang/deepseek-harness-linux` 已实测公开 Release 创建、GitHub Latest 重定向和真实下载（`linux-v0.2.1-rc.2`）；图形授权窗口、安装后重启仍需在 Ubuntu 桌面上点击确认，未自动化。
+追踪测试覆盖版本排序、RC 策略、版本线固定、手动跨线采纳、已发布版本跳过、草稿重试和已公开不完整版本拒绝；资源测试覆盖不可变下载地址、内容篡改、路径越界、feed/版本/源码记录不一致。完整 DEB 构建还需要网络下载官方包依赖和 Electron。`Hengguo-Zhang/deepseek-harness-linux` 已实测公开 Release 创建、GitHub Latest 重定向和真实下载（`linux-v0.2.1-rc.2`）；图形授权窗口、安装后重启仍需在 Ubuntu 桌面上点击确认，未自动化。
 
 SHA-512 用于检验下载内容是否符合 feed，不能替代独立签名；分发仓库及其发布权限是更新信任来源。请保护仓库写权限，并审阅官方新版本与 Linux 补丁后使用。

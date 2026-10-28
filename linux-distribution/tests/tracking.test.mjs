@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { selectCandidate, publicationDecision, assertLatestAdvance } from '../tracking.mjs';
+import { selectCandidate, publicationDecision, assertLatestAdvance, publishedLine } from '../tracking.mjs';
 
 const sha = 'a'.repeat(40);
 const tag = (name) => ({ name, commit: { sha } });
@@ -15,6 +15,22 @@ test('sorts semantic versions rather than dates or lexical order', () => {
 test('stable-only tracking excludes RC tags and stable outranks its RC', () => {
   assert.equal(selectCandidate([tag('v0.2.1-rc.3'), tag('v0.2.0')], { includePrereleases: false }).version, '0.2.0');
   assert.equal(selectCandidate([tag('v0.2.1-rc.3'), tag('v0.2.1')]).version, '0.2.1');
+});
+
+test('scheduled tracking stays on the released line until a manual tag adopts another', () => {
+  const tags = [tag('dsh-v0.2.1-rc.3'), tag('dsh-v0.2.1-rc.4'), tag('dsh-v0.2.2-alpha.2')];
+  assert.equal(selectCandidate(tags, { line: '0.2.1' }).version, '0.2.1-rc.4');
+  // A stable release on the same line outranks its RC and stays automatic.
+  assert.equal(selectCandidate([tag('dsh-v0.2.1-rc.4'), tag('dsh-v0.2.1')], { line: '0.2.1' }).version, '0.2.1');
+  // Only an explicit manual tag crosses to another line.
+  assert.equal(selectCandidate(tags, { line: '0.2.1', requestedTag: 'dsh-v0.2.2-alpha.2' }).version, '0.2.2-alpha.2');
+  assert.throws(() => selectCandidate([tag('dsh-v0.2.2-alpha.2')], { line: '0.2.1' }), /published line 0\.2\.1/);
+});
+
+test('the published line comes from the live Linux release tag', () => {
+  assert.equal(publishedLine(null), '');
+  assert.equal(publishedLine({ tag_name: 'linux-v0.2.1-rc.3' }), '0.2.1');
+  assert.throws(() => publishedLine({ tag_name: 'other-product-v1' }), /dedicated distribution/);
 });
 
 test('manual request must name an actual semantic upstream tag', () => {

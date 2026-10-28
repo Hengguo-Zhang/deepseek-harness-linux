@@ -8,7 +8,7 @@ const versionPattern = /^(?:(?:dsh-)?v)?(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)
 export function parseVersion(tag) {
   const match = versionPattern.exec(tag);
   if (!match || match[4]?.split('.').some((part) => /^\d+$/.test(part) && /^0\d/.test(part))) return null;
-  return { version: `${match[1]}.${match[2]}.${match[3]}${match[4] ? `-${match[4]}` : ''}`, numbers: match.slice(1, 4).map(BigInt), prerelease: match[4]?.split('.') ?? [] };
+  return { version: `${match[1]}.${match[2]}.${match[3]}${match[4] ? `-${match[4]}` : ''}`, base: `${match[1]}.${match[2]}.${match[3]}`, numbers: match.slice(1, 4).map(BigInt), prerelease: match[4]?.split('.') ?? [] };
 }
 
 /** Compare parsed semantic versions, including numeric RC components. */
@@ -32,14 +32,20 @@ export function compareVersions(a, b) {
 }
 
 /** Select the newest eligible official tag; a manual request must exist upstream. */
-export function selectCandidate(tags, { includePrereleases = true, requestedTag = '' } = {}) {
+export function selectCandidate(tags, { includePrereleases = true, requestedTag = '', line = '' } = {}) {
   if (requestedTag && !parseVersion(requestedTag)) throw new Error('Manual tag must be a semantic version tag (for example dsh-v0.2.1-rc.2)');
   const eligible = tags.flatMap((tag) => {
     const parsed = parseVersion(tag.name);
     if (!parsed || (!includePrereleases && parsed.prerelease.length) || (requestedTag && tag.name !== requestedTag)) return [];
+    // Scheduled tracking stays on the released version line; a manual tag adopts another line.
+    if (!requestedTag && line && parsed.base !== line) return [];
     return [{ ...parsed, tag: tag.name, sha: tag.commit?.sha }];
   }).sort((a, b) => compareVersions(b, a));
-  if (!eligible.length) throw new Error(requestedTag ? `Requested upstream tag ${requestedTag} not found or excluded by prerelease policy` : 'No eligible official semantic version tags');
+  if (!eligible.length) {
+    if (requestedTag) throw new Error(`Requested upstream tag ${requestedTag} not found or excluded by prerelease policy`);
+    if (line) throw new Error(`No eligible official semantic version tags on the published line ${line}`);
+    throw new Error('No eligible official semantic version tags');
+  }
   const chosen = eligible[0];
   if (!/^[a-f0-9]{40}$/.test(chosen.sha)) throw new Error('Official tag does not resolve to an immutable commit SHA');
   return { tag: chosen.tag, version: chosen.version, sha: chosen.sha, releaseTag: `linux-v${chosen.version}`, upstreamPrerelease: chosen.prerelease.length > 0 };
@@ -51,6 +57,14 @@ export function publicationDecision(release) {
   const names = release.assets.map((asset) => asset.name);
   if (!names.some((name) => name.endsWith('.deb')) || !['latest-linux.yml', 'app-update.yml', 'linux-source.json'].every((name) => names.includes(name))) throw new Error('Existing published Linux release is incomplete; refuse replacing immutable assets');
   return 'skip';
+}
+
+/** The released version line (major.minor.patch) that scheduled tracking may advance within. */
+export function publishedLine(latest) {
+  if (!latest) return '';
+  const parsed = latest.tag_name?.startsWith('linux-v') ? parseVersion(latest.tag_name.slice('linux-'.length)) : null;
+  if (!parsed) throw new Error('Latest distribution release is not a Linux OTA release; use a dedicated distribution repository');
+  return parsed.base;
 }
 
 /** Recheck the live channel immediately before publication; never move it backwards. */
@@ -95,12 +109,15 @@ async function main() {
   const source = process.env.DSH_UPSTREAM_SOURCE || 'tags';
   if (!['tags', 'releases'].includes(source)) throw new Error('DSH_UPSTREAM_SOURCE must be tags or releases');
   const releasedNames = new Set(releases.filter((release) => !release.draft).map((release) => release.tag_name));
+  const latest = await github(`/repos/${repository}/releases/latest`, { allow404: true });
+  const requestedTag = process.env.DSH_UPSTREAM_TAG || '';
   const candidate = selectCandidate(source === 'releases' ? tags.filter((tag) => releasedNames.has(tag.name)) : tags, {
-    includePrereleases: process.env.DSH_TRACK_PRERELEASES !== 'false', requestedTag: process.env.DSH_UPSTREAM_TAG || '',
+    includePrereleases: process.env.DSH_TRACK_PRERELEASES !== 'false', requestedTag,
+    // An explicit manual tag adopts a new version line; scheduled tracking never crosses it.
+    line: requestedTag ? '' : publishedLine(latest),
   });
   const existing = await github(`/repos/${repository}/releases/tags/${encodeURIComponent(candidate.releaseTag)}`, { allow404: true });
   const decision = publicationDecision(existing);
-  const latest = await github(`/repos/${repository}/releases/latest`, { allow404: true });
   if (decision === 'build') assertLatestAdvance(candidate.version, latest);
   const plan = { ...candidate, repository, upstream, distributionCommit: process.env.GITHUB_SHA, decision };
   await writeFile('linux-plan.json', `${JSON.stringify(plan, null, 2)}\n`);
