@@ -95,7 +95,7 @@ jobs:
           test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
           node --input-type=module -e 'import fs from "node:fs"; for (const path of ["package.json", "apps/desktop/package.json"]) { if (JSON.parse(fs.readFileSync(path)).version !== process.env.EXPECTED_VERSION) throw new Error(`${path} version differs from official tag`); }'
           applied=false
-          for patch in ../distribution/linux-distribution/patches/linux-amd64-0.2.1.patch ../distribution/linux-distribution/patches/linux-amd64.patch; do
+          for patch in ../distribution/linux-distribution/patches/linux-amd64-0.2.2-rc.5.patch ../distribution/linux-distribution/patches/linux-amd64-0.2.1.patch ../distribution/linux-distribution/patches/linux-amd64.patch; do
             if git apply --check "$patch"; then
               git apply "$patch"
               printf '%s\n' "$patch" > ../tracking/applied-patch.txt

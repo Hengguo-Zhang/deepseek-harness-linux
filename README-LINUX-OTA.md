@@ -39,7 +39,7 @@ Linux feed 在构建时自动写为 `https://github.com/YOUR_NAME/deepseek-harne
 
 在 **Actions → Linux official tracking and OTA → Run workflow** 运行。`upstream_tag` 留空时，工作流只在**当前已发布的版本线**（`linux-v…` Release 的 `major.minor.patch`，例如 `0.2.1`）内选择最新语义版本；需要切换到新的版本基线（例如从 `0.2.1` 跨到 `0.2.2`）时，必须在 `upstream_tag` 中显式指定官方标签，例如 `dsh-v0.2.2-alpha.2`。采纳一次后，后续自动跟踪随新线推进。分支名、任意提交和非版本标签不会作为手动更新目标。
 
-工作流解析版本大小而不是依赖标签返回顺序，固定官方提交 SHA，再核对根包和桌面包版本。随后按顺序检查维护的 `linux-amd64-0.2.1.patch`、`linux-amd64.patch`，只应用能够完整通过 `git apply --check` 的补丁。二者都不适用时停止；不会忽略失败片段或发布未经补丁的新版本。
+工作流解析版本大小而不是依赖标签返回顺序，固定官方提交 SHA，再核对根包和桌面包版本。随后按顺序检查维护的 `linux-amd64-0.2.2-rc.5.patch`、`linux-amd64-0.2.1.patch`、`linux-amd64.patch`，只应用能够完整通过 `git apply --check` 的补丁。全部都不适用时停止；不会忽略失败片段或发布未经补丁的新版本。
 
 Ubuntu 24.04 构建完成后，工作流验证 `.deb`、版本、文件长度、SHA-512、feed 地址及源码记录。发布作业先上传草稿资源，再公开完整 Release；用户可见的 Latest 不会指向上传一半的版本。失败后重新运行 `publish` 作业可用原始构建资源补传缺失文件，已有文件只有 GitHub 返回的 SHA-256 相同时才会复用。若重新构建使草稿已有文件发生变化，或已有文件缺少可核验摘要，工作流停止；确认仍为未公开草稿后，手动删除草稿再重新运行。任何资源都不会被覆盖。最终 metadata 中的 DEB 地址绑定具体 `linux-v…` 标签，因此检查后即使另有新版本发布，也会下载原来选中的文件。
 
